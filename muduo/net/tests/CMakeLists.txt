@@ -1,3 +1,8 @@
+add_executable(muduo_net_contract_test NetContract_test.cc)
+target_link_libraries(muduo_net_contract_test muduo_net gtest_main)
+add_test(NAME muduo_net_contract_test COMMAND muduo_net_contract_test)
+set_tests_properties(muduo_net_contract_test PROPERTIES TIMEOUT 90)
+
 add_executable(channeltest channeltest/ChannelTest.cc)
 target_link_libraries(channeltest muduo_net)
 

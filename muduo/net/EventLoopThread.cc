@@ -19,11 +19,7 @@ EventLoopThread::EventLoopThread(const ThreadInitCallback& cb,
     exiting_(false),
     thread_(std::bind(&EventLoopThread::threadFunc, this), name),
     mutex_(),
-#ifdef __muduo_asynchronization__
     cond_(mutex_),
-#else
-    cond_(),
-#endif
     callback_(cb)
 {
 }
@@ -50,11 +46,7 @@ EventLoop* EventLoopThread::startLoop()
     MutexLockGuard lock(mutex_);
     while (loop_ == NULL)
     {
-#ifdef __muduo_asynchronization__
       cond_.wait();
-#else
-      cond_.wait(lock);
-#endif
     }
     loop = loop_;
   }

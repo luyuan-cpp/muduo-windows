@@ -1,3 +1,8 @@
+add_executable(muduo_base_contract_test BaseContract_test.cc)
+target_link_libraries(muduo_base_contract_test muduo_base gtest_main)
+add_test(NAME muduo_base_contract_test COMMAND muduo_base_contract_test)
+set_tests_properties(muduo_base_contract_test PROPERTIES TIMEOUT 30)
+
 add_executable(asyncloggingtest asyncloggingtest/AsyncLoggingTest.cc)
 target_link_libraries(asyncloggingtest muduo_base)
 

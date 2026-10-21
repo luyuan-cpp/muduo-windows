@@ -3,6 +3,9 @@ cmake_minimum_required(VERSION 3.5...3.31)
 if(POLICY CMP0048)
   cmake_policy(SET CMP0048 NEW)
 endif()
+if(POLICY CMP0091)
+  cmake_policy(SET CMP0091 NEW)
+endif()
 
 project(muduo C CXX)
 
@@ -10,8 +13,13 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(MUDUO_BUILD_PROTOBUF "构建可选 protobuf 编解码、RPC 和相关示例" ON)
+option(MUDUO_BUILD_TESTS "构建 Muduo 测试" ON)
+
 if(MSVC)
-  add_compile_options(/std:c++latest)
+  # 依赖和本库统一使用 /MD(d)，在 FetchContent 创建任何目标前固定运行库。
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+  add_compile_options(/std:c++latest /utf-8)
 endif()
 
 # Keep FetchContent cache stable across different build directories.
@@ -49,6 +57,7 @@ else()
   )
 endif()
 
+if(MUDUO_BUILD_PROTOBUF)
 if(EXISTS "${PROTOBUF_LOCAL_DIR}/CMakeLists.txt")
   message(STATUS "Using local protobuf source: ${PROTOBUF_LOCAL_DIR}")
   FetchContent_Declare(protobuf SOURCE_DIR "${PROTOBUF_LOCAL_DIR}")
@@ -58,6 +67,7 @@ else()
     GIT_TAG ${PROTOBUF_TAG}
     GIT_SHALLOW TRUE
   )
+endif()
 endif()
 
 if(EXISTS "${ZLIB_LOCAL_DIR}/CMakeLists.txt")
@@ -79,11 +89,14 @@ if(MSVC)
   set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "" FORCE)
 endif()
 
-FetchContent_MakeAvailable(boost googletest protobuf zlib)
-
 # Prevent GoogleTest from overriding our compiler/linker options
 # when building with Visual Studio
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(boost googletest zlib)
+if(MUDUO_BUILD_PROTOBUF)
+  FetchContent_MakeAvailable(protobuf)
+endif()
 
 enable_testing()
 
@@ -98,19 +111,6 @@ if (MSVC)
   add_definitions( /wd4068 /wd4996 /wd4244)
   # Allow big object
   add_definitions(/bigobj)
-  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} ")
-  set(CompilerFlags
-        CMAKE_CXX_FLAGS
-        CMAKE_CXX_FLAGS_DEBUG
-        CMAKE_CXX_FLAGS_RELEASE
-        CMAKE_C_FLAGS
-        CMAKE_C_FLAGS_DEBUG
-        CMAKE_C_FLAGS_RELEASE
-        )
-    foreach(CompilerFlag ${CompilerFlags})
-        string(REPLACE "/MD" "/MT" ${CompilerFlag} "${${CompilerFlag}}")
-    endforeach()
-
 else (MSVC)
 
   set(CXX_FLAGS
@@ -153,7 +153,9 @@ include_directories(contrib/windows/include)
 include_directories(${boost_SOURCE_DIR})
 include_directories(${googletest_SOURCE_DIR}/googletest/include)
 include_directories(${googletest_SOURCE_DIR}/googlemock/include)
-include_directories(${protobuf_SOURCE_DIR}/src)
+if(MUDUO_BUILD_PROTOBUF)
+  include_directories(${protobuf_SOURCE_DIR}/src)
+endif()
 include_directories(muduo/net/protorpc)
 include_directories(${zlib_SOURCE_DIR})
 include_directories("${zlib_BINARY_DIR}")
@@ -165,12 +167,15 @@ message(STATUS "CXX_FLAGS = " ${CMAKE_CXX_FLAGS} " " ${CMAKE_CXX_FLAGS_${BUILD_T
 
 add_subdirectory(muduo/base)
 add_subdirectory(muduo/net)
-add_subdirectory(examples/protobuf)
+if(MUDUO_BUILD_PROTOBUF AND NOT CMAKE_BUILD_NO_EXAMPLES)
+  add_subdirectory(examples/protobuf)
+endif()
 
 # Merge muduo_base.lib + muduo_net.lib into a single muduo.lib
 if(MSVC)
   set(muduo_combined_output "${CMAKE_BINARY_DIR}/lib/$<CONFIG>/muduo.lib")
   add_custom_target(muduo ALL
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/lib/$<CONFIG>"
     COMMAND "${CMAKE_AR}" /NOLOGO
             "/OUT:${muduo_combined_output}"
             "$<TARGET_FILE:muduo_base>"

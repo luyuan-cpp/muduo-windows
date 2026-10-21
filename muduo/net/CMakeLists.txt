@@ -26,6 +26,9 @@ set(net_SRCS
   Timer.cc
   TimerQueue.cc
   )
+if(WIN32)
+  list(APPEND net_SRCS WindowsWakeup.cc)
+endif()
 include_directories(${PROJECT_SOURCE_DIR}/contrib/windows/include)
 add_library(muduo_net ${net_SRCS})
 if (WIN32)
@@ -51,10 +54,11 @@ set(HEADERS
   )
 install(FILES ${HEADERS} DESTINATION include/muduo/net)
 
-if(NOT CMAKE_BUILD_NO_EXAMPLES)
+if(MUDUO_BUILD_TESTS)
   add_subdirectory(tests)
 endif()
 
+if(MUDUO_BUILD_PROTOBUF)
 if (MSVC)
   add_subdirectory(protobuf)
   add_subdirectory(protorpc)
@@ -65,5 +69,6 @@ if(PROTOBUF_FOUND)
 else()
   add_subdirectory(protobuf EXCLUDE_FROM_ALL)
   add_subdirectory(protorpc EXCLUDE_FROM_ALL)
+endif()
 endif()
 endif()

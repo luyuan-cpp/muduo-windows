@@ -4,6 +4,7 @@ cc_library(
         "AsyncLogging.cc",
         "Condition.cc",
         "CountDownLatch.cc",
+        "CrossPlatformAdapterFunction.cc",
         "CurrentThread.cc",
         "Date.cc",
         "Exception.cc",

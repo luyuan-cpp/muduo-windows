@@ -64,6 +64,14 @@ class TcpClient : noncopyable
   void setWriteCompleteCallback(WriteCompleteCallback cb)
   { writeCompleteCallback_ = std::move(cb); }
 
+  // 在 connect() 前设置，与其他 setter 一样不保证线程安全。
+  // 每次失败在 loop 线程通知一次；可在回调中 stop()，阻止内部继续重试。
+  // 错误值为 errno 或 SO_ERROR，Windows 的后者使用 WSA 错误码。
+  // 不得同步 connect() 或释放最后一个引用；重连须排到下一轮。
+  // 回调直接存入 Connector，不增加 TcpClient 的数据成员。
+  typedef std::function<void (int savedErrno)> ConnectFailedCallback;
+  void setConnectFailedCallback(ConnectFailedCallback cb);
+
  private:
   /// Not thread safe, but in loop
   void newConnection(int sockfd);

@@ -15,6 +15,7 @@
 #include "muduo/net/SocketsOps.h"
 
 #include <errno.h>
+#include <algorithm>
 
 using namespace muduo;
 using namespace muduo::net;
@@ -40,7 +41,7 @@ Connector::~Connector()
 void Connector::start()
 {
   connect_ = true;
-  loop_->runInLoop(std::bind(&Connector::startInLoop, this)); // FIXME: unsafe
+  loop_->runInLoop(std::bind(&Connector::startInLoop, shared_from_this())); // 排队任务持有自身，避免执行前对象已析构。
 }
 
 void Connector::startInLoop()
@@ -60,7 +61,7 @@ void Connector::startInLoop()
 void Connector::stop()
 {
   connect_ = false;
-  loop_->queueInLoop(std::bind(&Connector::stopInLoop, this)); // FIXME: unsafe
+  loop_->queueInLoop(std::bind(&Connector::stopInLoop, shared_from_this())); // 排队任务持有自身，避免执行前对象已析构。
   // FIXME: cancel timer
 }
 
@@ -71,7 +72,7 @@ void Connector::stopInLoop()
   {
     setState(kDisconnected);
     int sockfd = removeAndResetChannel();
-    retry(sockfd);
+    retry(sockfd, 0);
   }
 }
 
@@ -94,7 +95,7 @@ void Connector::connect()
     case EADDRNOTAVAIL:
     case ECONNREFUSED:
     case ENETUNREACH:
-      retry(sockfd);
+      retry(sockfd, savedErrno);
       break;
 
     case EACCES:
@@ -106,12 +107,13 @@ void Connector::connect()
     case ENOTSOCK:
       LOG_SYSERR << "connect error in Connector::startInLoop " << savedErrno;
       sockets::close(sockfd);
+      notifyConnectFailed(savedErrno);
       break;
 
     default:
       LOG_SYSERR << "Unexpected error in Connector::startInLoop " << savedErrno;
       sockets::close(sockfd);
-      // connectErrorCallback_();
+      notifyConnectFailed(savedErrno);
       break;
   }
 }
@@ -146,7 +148,7 @@ int Connector::removeAndResetChannel()
   channel_->remove();
   int sockfd = channel_->fd();
   // Can't reset channel_ here, because we are inside Channel::handleEvent
-  loop_->queueInLoop(std::bind(&Connector::resetChannel, this)); // FIXME: unsafe
+  loop_->queueInLoop(std::bind(&Connector::resetChannel, shared_from_this())); // 排队任务持有自身，避免执行前对象已析构。
   return sockfd;
 }
 
@@ -167,12 +169,12 @@ void Connector::handleWrite()
     {
       LOG_WARN << "Connector::handleWrite - SO_ERROR = "
                << err << " " << strerror_tl(err);
-      retry(sockfd);
+      retry(sockfd, err);
     }
     else if (sockets::isSelfConnect(sockfd))
     {
       LOG_WARN << "Connector::handleWrite - Self connect";
-      retry(sockfd);
+      retry(sockfd, 0);
     }
     else
     {
@@ -202,14 +204,16 @@ void Connector::handleError()
     int sockfd = removeAndResetChannel();
     int err = sockets::getSocketError(sockfd);
     LOG_TRACE << "SO_ERROR = " << err << " " << strerror_tl(err);
-    retry(sockfd);
+    retry(sockfd, err);
   }
 }
 
-void Connector::retry(int sockfd)
+void Connector::retry(int sockfd, int savedErrno)
 {
   sockets::close(sockfd);
   setState(kDisconnected);
+  // 回调允许 stop()；必须在回调返回后重新读取 connect_ 决定是否重试。
+  notifyConnectFailed(savedErrno);
   if (connect_)
   {
     LOG_INFO << "Connector::retry - Retry connecting to " << serverAddr_.toIpPort()
@@ -221,6 +225,15 @@ void Connector::retry(int sockfd)
   else
   {
     LOG_DEBUG << "do not connect";
+  }
+}
+
+void Connector::notifyConnectFailed(int savedErrno)
+{
+  // stopInLoop 也经过 retry 清理连接，但主动停止不属于连接失败。
+  if (connect_ && connectFailedCallback_)
+  {
+    connectFailedCallback_(savedErrno);
   }
 }
 

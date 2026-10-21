@@ -9,11 +9,7 @@ using namespace muduo;
 
 CountDownLatch::CountDownLatch(int count)
   : mutex_(),
-#ifdef __muduo_asynchronization__
     condition_(mutex_),
-#else
-    condition_(),
-#endif
     count_(count)
 {
 }
@@ -23,11 +19,7 @@ void CountDownLatch::wait()
   MutexLockGuard lock(mutex_);
   while (count_ > 0)
   {
-#ifdef __muduo_asynchronization__
     condition_.wait();
-#else
-    condition_.wait(lock);
-#endif
   }
 }
 

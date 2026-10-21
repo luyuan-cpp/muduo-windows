@@ -41,5 +41,6 @@ project "net"
         'TcpServer.cc',
         'Timer.cc',
         'TimerQueue.cc',
+        'WindowsWakeup.cc',
      }
 

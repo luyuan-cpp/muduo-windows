@@ -32,6 +32,6 @@ install(TARGETS muduo_base DESTINATION lib)
 file(GLOB HEADERS "*.h")
 install(FILES ${HEADERS} DESTINATION include/muduo/base)
 
-if(NOT CMAKE_BUILD_NO_EXAMPLES)
+if(MUDUO_BUILD_TESTS)
   add_subdirectory(tests)
 endif()

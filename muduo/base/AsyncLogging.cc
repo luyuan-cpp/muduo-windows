@@ -21,11 +21,7 @@ AsyncLogging::AsyncLogging(const string& basename,
     thread_(std::bind(&AsyncLogging::threadFunc, this), "Logging"),
     latch_(1),
     mutex_(),
-#ifdef __muduo_asynchronization__
     cond_(mutex_),
-#else
-    cond_(),
-#endif
     currentBuffer_(new Buffer),
     nextBuffer_(new Buffer),
     buffers_()
@@ -80,11 +76,7 @@ void AsyncLogging::threadFunc()
       muduo::MutexLockGuard lock(mutex_);
       if (buffers_.empty())  // unusual usage!
       {
-#ifdef __muduo_asynchronization__
         cond_.waitForSeconds(flushInterval_);
-#else
-        cond_.waitForSeconds(lock, flushInterval_);
-#endif
       }
       buffers_.push_back(std::move(currentBuffer_));
       currentBuffer_ = std::move(newBuffer1);

@@ -65,7 +65,7 @@ TcpClient::TcpClient(EventLoop* loop,
 {
   connector_->setNewConnectionCallback(
       std::bind(&TcpClient::newConnection, this, _1));
-  // FIXME setConnectFailedCallback
+  // 连接失败回调由 setter 直接存入 Connector，未设置时保留原行为。
   LOG_INFO << "TcpClient::TcpClient[" << name_
            << "] - connector " << get_pointer(connector_);
 }
@@ -131,6 +131,11 @@ void TcpClient::stop()
 {
   connect_ = false;
   connector_->stop();
+}
+
+void TcpClient::setConnectFailedCallback(ConnectFailedCallback cb)
+{
+  connector_->setConnectFailedCallback(std::move(cb));
 }
 
 void TcpClient::newConnection(int sockfd)

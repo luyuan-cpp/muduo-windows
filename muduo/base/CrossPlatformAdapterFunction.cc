@@ -310,8 +310,8 @@ extern inline int __libc_use_alloca(size_t size)
 
 ssize_t winreadsock(int fd, void *buf, size_t count)
 {
-    // Use plain recv() on non-blocking socket (FIONBIO=1).
-    // WSARecv + OVERLAPPED on a non-overlapped socket can block unexpectedly.
+    // 对非阻塞 socket（FIONBIO=1）直接使用 recv()。
+    // 旧实现对未启用重叠 I/O 的 socket 传入 WSAOVERLAPPED 调用 WSARecv，语义不匹配。
     int ret = ::recv(fd, static_cast<char *>(buf), static_cast<int>(count), 0);
     if (ret < 0)
     {
@@ -335,8 +335,9 @@ ssize_t winreadsock(int fd, void *buf, size_t count)
 
 ssize_t winwritesock(int fd, const void *buf, size_t count)
 {
-    // Use plain send() on non-blocking socket (FIONBIO=1).
-    // WSASend + OVERLAPPED on a non-overlapped socket can block unexpectedly.
+    // 对非阻塞 socket（FIONBIO=1）直接使用 send()。
+    // 旧实现对未启用重叠 I/O 的 socket 传入 WSAOVERLAPPED 调用 WSASend，
+    // TCP 发送缓冲区满时会阻塞 EventLoop。
     int ret = ::send(fd, static_cast<const char *>(buf), static_cast<int>(count), 0);
     if (ret < 0)
     {
@@ -685,7 +686,50 @@ unsigned int sleep(unsigned int seconds)
 }
 int poll(struct pollfd *fds, size_t nfds, int timeout)
 {
-	return WSAPoll(fds, (ULONG)nfds, timeout);
+	// muduo 用负 fd 暂停槽位；WSAPoll 会把它当作无效 socket，必须先排除。
+	bool hasIgnored = false;
+	for (size_t i = 0; i < nfds; ++i)
+	{
+		if (static_cast<std::intptr_t>(fds[i].fd) < 0)
+		{
+			hasIgnored = true;
+			break;
+		}
+	}
+	if (nfds != 0 && !hasIgnored)
+	{
+		return WSAPoll(fds, static_cast<ULONG>(nfds), timeout);
+	}
+
+	std::vector<pollfd> active;
+	std::vector<size_t> indices;
+	active.reserve(nfds);
+	indices.reserve(nfds);
+	for (size_t i = 0; i < nfds; ++i)
+	{
+		fds[i].revents = 0;
+		if (static_cast<std::intptr_t>(fds[i].fd) >= 0)
+		{
+			active.push_back(fds[i]);
+			indices.push_back(i);
+		}
+	}
+	if (active.empty())
+	{
+		// 没有可监听的槽位时也遵守超时，避免暂停连接造成忙轮询。
+		::Sleep(timeout < 0 ? INFINITE : static_cast<DWORD>(timeout));
+		return 0;
+	}
+
+	const int result = WSAPoll(active.data(), static_cast<ULONG>(active.size()), timeout);
+	if (result >= 0)
+	{
+		for (size_t i = 0; i < active.size(); ++i)
+		{
+			fds[indices[i]].revents = active[i].revents;
+		}
+	}
+	return result;
 }
 
 uid_t geteuid()
@@ -716,42 +760,74 @@ int accept4(int sockfd, struct sockaddr *addr,
     socklen_t *addrlen, int flags)
 {
     int connfd = (int)::accept(sockfd, addr, addrlen);
-    u_long  mode = 0;
-    ioctlsocket(connfd, FIONBIO, &mode);
+    if (connfd < 0)
+    {
+        return connfd;
+    }
+    // muduo 的读写都在 EventLoop 线程，已接受的连接必须保持非阻塞。
+    u_long mode = 1;
+    if (ioctlsocket(connfd, FIONBIO, &mode) == SOCKET_ERROR)
+    {
+        const int savedWSA = WSAGetLastError();
+        closesocket(connfd);
+        // 沿用相邻适配函数的 errno 回传方式，并保留关闭前的 Winsock 错误。
+        _set_errno(savedWSA);
+        WSASetLastError(savedWSA);
+        return -1;
+    }
     return connfd;
 }
 
 int32_t win_connect(int sockfd, const struct sockaddr* addr)
 {
+    // 非阻塞连接须保持 muduo Connector 预期的 Linux 语义。
+    // 旧实现同步调用 select()，最多阻塞 EventLoop 5 秒，随后无条件返回 0；
+    // 失败或半开的连接因此被误报为成功，系统回收连接时才出现断线告警。
+    // 这里将 WSA 错误映射到 errno 并返回 -1，让 Connector::connect() 进入
+    // EINPROGRESS 分支，由 Poller 等待可写，再由 handleWrite() 读取 SO_ERROR
+    // 判断连接结果，整个过程保持非阻塞。
     auto result = ::connect(sockfd, addr, static_cast<socklen_t>(sizeof(struct sockaddr_in6)));
-    if (result == SOCKET_ERROR) {
-        int error_code = WSAGetLastError();
-        if (error_code == WSAEWOULDBLOCK) {
-            LOG_INFO << "Connect is in progress (WSAEWOULDBLOCK). Waiting for completion..." ;
-
-            // 使用 select 等待套接字可写
-            fd_set writefds;
-            FD_ZERO(&writefds);
-            FD_SET(sockfd, &writefds);
-
-            timeval timeout;
-            timeout.tv_sec = 5;  // 等待 5 秒
-            timeout.tv_usec = 0;
-
-            result = select(0, nullptr, &writefds, nullptr, &timeout);
-            if (result > 0 && FD_ISSET(sockfd, &writefds)) {
-                LOG_INFO << "Connection established!" ;
-            }
-            else if (result == 0) {
-                LOG_INFO << "Connection timed out.";
-            }
-            else {
-                LOG_ERROR << "Select failed with error: " << WSAGetLastError() ;
-            }
-            return 0;
+    if (result == SOCKET_ERROR)
+    {
+        const int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS)
+        {
+            errno = EINPROGRESS;
         }
+        else if (err == WSAEISCONN)
+        {
+            errno = EISCONN;
+        }
+        else if (err == WSAEINTR)
+        {
+            errno = EINTR;
+        }
+        else if (err == WSAEALREADY)
+        {
+            errno = EALREADY;
+        }
+        else if (err == WSAECONNREFUSED)
+        {
+            errno = ECONNREFUSED;
+        }
+        else if (err == WSAENETUNREACH)
+        {
+            errno = ENETUNREACH;
+        }
+        else if (err == WSAEADDRINUSE)
+        {
+            errno = EADDRINUSE;
+        }
+        else if (err == WSAEADDRNOTAVAIL)
+        {
+            errno = EADDRNOTAVAIL;
+        }
+        else
+        {
+            _set_errno(err);
+        }
+        return -1;
     }
-
     return result;
 }
 

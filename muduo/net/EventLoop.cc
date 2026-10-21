@@ -15,6 +15,10 @@
 #include "muduo/net/SocketsOps.h"
 #include "muduo/net/TimerQueue.h"
 
+#ifdef WIN32
+#include "muduo/net/WindowsWakeup.h"
+#endif
+
 #include <algorithm>
 
 #include <signal.h>
@@ -36,6 +40,9 @@ const int kPollTimeMs = muduo_eventloop_poll_timeout_ms();
 
 int createEventfd()
 {
+#ifdef WIN32
+  return windows::createWakeupFd();
+#else
   int evtfd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   if (evtfd < 0)
   {
@@ -43,6 +50,7 @@ int createEventfd()
     abort();
   }
   return evtfd;
+#endif
 }
 
 #pragma GCC diagnostic ignored "-Wold-style-cast"
@@ -123,7 +131,11 @@ void EventLoop::loop()
   while (!quit_)
   {
     activeChannels_.clear();
+#ifdef WIN32
+    pollReturnTime_ = poller_->poll(timerQueue_->nextTimeoutMs(kPollTimeMs), &activeChannels_);
+#else
     pollReturnTime_ = poller_->poll(kPollTimeMs, &activeChannels_);
+#endif
     ++iteration_;
     if (Logger::logLevel() <= Logger::TRACE)
     {
@@ -196,19 +208,24 @@ size_t EventLoop::queueSize() const
 
 TimerId EventLoop::runAt(Timestamp time, TimerCallback cb)
 {
-  return timerQueue_->addTimer(std::move(cb), time, 0.0);
+  // 先读墙钟、后读单调钟,顺序必须显式(函数实参的求值顺序未指定,MSVC 通常从右往左):两次读数之间
+  // 线程若被抢占 P,先墙后单调只会让截止时刻晚 P;反过来会让定时器比墙钟时刻早 P 触发。
+  const Timestamp wallNow = Timestamp::now();
+  const Timestamp monoNow = TimerQueue::monotonicNow();
+  const Timestamp when = TimerQueue::monotonicFromWall(time, wallNow, monoNow);
+  return timerQueue_->addTimer(std::move(cb), when, 0.0);
 }
 
 TimerId EventLoop::runAfter(double delay, TimerCallback cb)
 {
-  Timestamp time(addTime(Timestamp::now(), delay));
-  return runAt(time, std::move(cb));
+  const Timestamp when(addTime(TimerQueue::monotonicNow(), delay));
+  return timerQueue_->addTimer(std::move(cb), when, 0.0);
 }
 
 TimerId EventLoop::runEvery(double interval, TimerCallback cb)
 {
-  Timestamp time(addTime(Timestamp::now(), interval));
-  return timerQueue_->addTimer(std::move(cb), time, interval);
+  const Timestamp when(addTime(TimerQueue::monotonicNow(), interval));
+  return timerQueue_->addTimer(std::move(cb), when, interval);
 }
 
 void EventLoop::cancel(TimerId timerId)
@@ -255,13 +272,13 @@ void EventLoop::wakeup()
   uint64_t one = 1;
   ssize_t n = sockets::write(wakeupFd_, &one, sizeof one);
   if (n != sizeof one)
-#else
-  ssize_t n = muduo_eventloop_wakeup_write(wakeupFd_);
-  if (n != static_cast<ssize_t>(sizeof(uint64_t)))
-#endif
   {
     LOG_ERROR << "EventLoop::wakeup() writes " << n << " bytes instead of 8";
   }
+#endif // __linux__
+#ifdef WIN32
+  windows::wakeup(wakeupFd_);
+#endif // WIN32
 }
 
 void EventLoop::handleRead()
@@ -270,13 +287,13 @@ void EventLoop::handleRead()
   uint64_t one = 1;
   ssize_t n = sockets::read(wakeupFd_, &one, sizeof one);
   if (n != sizeof one)
-#else
-  ssize_t n = muduo_eventloop_wakeup_read(wakeupFd_);
-  if (n != static_cast<ssize_t>(sizeof(uint64_t)))
-#endif
   {
     LOG_ERROR << "EventLoop::handleRead() reads " << n << " bytes instead of 8";
   }
+#endif // __linux__
+#ifdef WIN32
+  windows::drainWakeupFd(wakeupFd_);
+#endif // WIN32
 }
 
 void EventLoop::doPendingFunctors()
