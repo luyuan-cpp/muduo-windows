@@ -139,9 +139,13 @@ TimerQueue::~TimerQueue()
   muduo_close_timerfd(timerfd_);
 #endif
   // do not remove channel, since we're in EventLoop::dtor();
-  for (const Entry& timer : timers_)
+  while (!timers_.empty())
   {
-    delete timer.second;
+    Timer* timer = timers_.begin()->second;
+    timers_.erase(timers_.begin());
+    activeTimers_.erase(ActiveTimer(timer, timer->sequence()));
+    // 闭包捕获对象的析构可能重入 cancel 自己或另一只 Timer；先摘除两个索引再释放。
+    delete timer;
   }
 }
 
@@ -180,10 +184,12 @@ void TimerQueue::cancelInLoop(TimerId timerId)
   ActiveTimerSet::iterator it = activeTimers_.find(timer);
   if (it != activeTimers_.end())
   {
-    size_t n = timers_.erase(Entry(it->first->expiration(), it->first));
+    Timer* cancelledTimer = it->first;
+    size_t n = timers_.erase(Entry(cancelledTimer->expiration(), cancelledTimer));
     assert(n == 1); (void)n;
-    delete it->first; // FIXME: no delete please
     activeTimers_.erase(it);
+    // 闭包析构可以再次 cancel；重入时两个索引必须一致，且不能再次找到本 Timer。
+    delete cancelledTimer;
   }
   else if (callingExpiredTimers_)
   {
@@ -236,9 +242,9 @@ void TimerQueue::handleRead()
     }
     it.second->run();
   }
-  callingExpiredTimers_ = false;
-
+  // reset 析构的闭包也可能取消本批重复 Timer，取消窗口必须覆盖清理阶段。
   reset(expired, now);
+  callingExpiredTimers_ = false;
 }
 
 std::vector<TimerQueue::Entry> TimerQueue::getExpired(Timestamp now)

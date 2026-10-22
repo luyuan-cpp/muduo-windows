@@ -53,11 +53,6 @@ bool muduo_channel_default_log_hup()
     return true;
 }
 
-bool muduo_channel_return_after_close()
-{
-    return false;
-}
-
 int muduo_socket_connect_compat(int sockfd, const struct sockaddr* addr)
 {
     return ::connect(sockfd, addr, static_cast<socklen_t>(sizeof(struct sockaddr_in6)));
@@ -83,23 +78,6 @@ std::string muduo_make_loop_thread_name(const std::string& base, int index)
     char buf[64];
     std::snprintf(buf, sizeof buf, "%s%d", base.c_str(), index);
     return std::string(buf);
-}
-
-ssize_t muduo_eventloop_wakeup_write(int fd)
-{
-    uint64_t one = 1;
-    return ::write(fd, &one, sizeof one);
-}
-
-ssize_t muduo_eventloop_wakeup_read(int fd)
-{
-    uint64_t one = 1;
-    return ::read(fd, &one, sizeof one);
-}
-
-bool muduo_use_epoll_poller()
-{
-    return !::getenv("MUDUO_USE_POLL");
 }
 
 int muduo_open_idle_fd(int family)
@@ -383,11 +361,6 @@ int muduo_open_idle_fd(int family)
     return sockfd;
 }
 
-bool muduo_use_epoll_poller()
-{
-    return false;  // Windows: always use PollPoller
-}
-
 int muduo_eventloop_poll_timeout_ms()
 {
     return 100;
@@ -410,11 +383,6 @@ bool muduo_eventloop_use_timerqueue_loop()
 bool muduo_channel_default_log_hup()
 {
     return false;
-}
-
-bool muduo_channel_return_after_close()
-{
-    return true;
 }
 
 int muduo_socket_connect_compat(int sockfd, const struct sockaddr* addr)
@@ -440,18 +408,6 @@ int muduo_socket_close_compat(int sockfd)
 std::string muduo_make_loop_thread_name(const std::string& base, int index)
 {
     return base + std::to_string(index);
-}
-
-ssize_t muduo_eventloop_wakeup_write(int fd)
-{
-    (void)fd;
-    return sizeof(uint64_t);
-}
-
-ssize_t muduo_eventloop_wakeup_read(int fd)
-{
-    (void)fd;
-    return sizeof(uint64_t);
 }
 
 void muduo_close_idle_fd(int fd)

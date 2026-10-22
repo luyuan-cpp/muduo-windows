@@ -224,17 +224,13 @@ int muduo_eventloop_poll_timeout_ms();
 void muduo_ignore_sigpipe();
 void muduo_close_fd_compat(int fd);
 bool muduo_eventloop_use_timerqueue_loop();
-ssize_t muduo_eventloop_wakeup_write(int fd);
-ssize_t muduo_eventloop_wakeup_read(int fd);
 bool muduo_channel_default_log_hup();
-bool muduo_channel_return_after_close();
 int muduo_socket_connect_compat(int sockfd, const struct sockaddr* addr);
 ssize_t muduo_socket_read_compat(int sockfd, void* buf, size_t count);
 ssize_t muduo_socket_write_compat(int sockfd, const void* buf, size_t count);
 int muduo_socket_close_compat(int sockfd);
 std::string muduo_make_loop_thread_name(const std::string& base, int index);
 
-bool muduo_use_epoll_poller();
 int muduo_open_idle_fd(int family);
 void muduo_close_idle_fd(int fd);
 void muduo_handle_emfile_idle_fd(int listenfd, int* idlefd, int family);

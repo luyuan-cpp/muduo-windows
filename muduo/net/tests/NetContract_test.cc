@@ -20,6 +20,7 @@
 #include <future>
 #include <memory>
 #include <thread>
+#include <utility>
 #include <vector>
 
 // muduo 头放在所有标准库头之后(它的 Windows 适配头 #define 了 off_t / pid_t 等名字)。
@@ -57,7 +58,7 @@ double ToMilliseconds(Clock::duration duration)
     return std::chrono::duration<double, std::milli>(duration).count();
 }
 
-class EventLoopWakeupTest : public ::testing::Test
+class SocketRuntimeTest : public ::testing::Test
 {
 protected:
     static void SetUpTestSuite()
@@ -75,13 +76,22 @@ protected:
         ::WSACleanup();
 #endif
     }
+};
 
+class EventLoopWakeupTest : public SocketRuntimeTest
+{
+protected:
     void SetUp() override
     {
         loop_.runAfter(kSafetyQuitSeconds, [this] { loop_.quit(); });
     }
 
     muduo::net::EventLoop loop_;
+};
+
+// 清理回归需要自行控制 EventLoop 的构造与析构，复用同一套套件级 socket 初始化。
+class TimerQueueCleanupTest : public SocketRuntimeTest
+{
 };
 
 // 别的线程 queueInLoop 时 loop 正阻塞在 poll 里(或刚跑完上一轮的 pending functor、即将进入 poll):
@@ -382,6 +392,110 @@ TEST(TimerClockContractTest, MonotonicNowDoesNotMoveBackwards)
         ASSERT_LE(previous.microSecondsSinceEpoch(), current.microSecondsSinceEpoch());
         previous = current;
     }
+}
+
+TEST_F(TimerQueueCleanupTest, CancellationCallbackCleanupCanCancelAnotherActiveTimer)
+{
+    muduo::net::EventLoop loop;
+    int victimFires = 0;
+    int cleanupCount = 0;
+    const muduo::net::TimerId victimId = loop.runAfter(0.01, [&victimFires] { ++victimFires; });
+    muduo::net::TimerId cancelledId;
+
+    // 唯一控制块由被取消 Timer 的闭包持有；释放闭包时重入取消自己与另一只活动 Timer。
+    auto cleanup = std::shared_ptr<void>(nullptr, [&](void*) {
+        ++cleanupCount;
+        loop.cancel(cancelledId);
+        loop.cancel(victimId);
+    });
+    cancelledId = loop.runAfter(1.0, [cleanup = std::move(cleanup)] {
+        (void)cleanup;
+    });
+
+    loop.cancel(cancelledId);
+    loop.runAfter(0.02, [&loop] { loop.quit(); });
+    loop.loop();
+
+    EXPECT_EQ(1, cleanupCount);
+    EXPECT_EQ(0, victimFires);
+}
+
+TEST_F(TimerQueueCleanupTest, EventLoopDestructionCanCancelOwnAndAnotherTimer)
+{
+    int cleanupCount = 0;
+    int victimCleanupCount = 0;
+    muduo::net::TimerId cancelledId;
+    {
+        muduo::net::EventLoop loop;
+        auto victimCleanup = std::shared_ptr<void>(nullptr, [&](void*) {
+            ++victimCleanupCount;
+        });
+        const muduo::net::TimerId victimId = loop.runAfter(120.0, [cleanup = std::move(victimCleanup)] {
+            (void)cleanup;
+        });
+        auto cleanup = std::shared_ptr<void>(nullptr, [&loop, &cancelledId, victimId, &cleanupCount](void*) {
+            ++cleanupCount;
+            // loop 仍在析构栈上，不依赖已清空的线程局部 EventLoop 句柄。
+            loop.cancel(cancelledId);
+            loop.cancel(victimId);
+        });
+        cancelledId = loop.runAfter(60.0, [cleanup = std::move(cleanup)] {
+            (void)cleanup;
+        });
+        // 不运行 loop；只由 TimerQueue 析构清理尚未到期的回调。
+    }
+
+    EXPECT_EQ(1, cleanupCount);
+    EXPECT_EQ(1, victimCleanupCount);
+}
+
+TEST_F(TimerQueueCleanupTest, ExpiredCallbackCleanupCanCancelRepeatingTimer)
+{
+    muduo::net::EventLoop loop;
+    int fires = 0;
+    int firesAfterDestruction = 0;
+    int ownerDestructions = 0;
+    muduo::net::TimerId repeatingId;
+    // 小于 1us 的正间隔保留重复属性，首次到期增量截为 0，保证与过去时刻的一次性 Timer 同批。
+    constexpr double kImmediateRepeatIntervalSeconds = 0.0000001;
+    repeatingId = loop.runEvery(kImmediateRepeatIntervalSeconds, [&]() {
+        ++fires;
+        if (fires == 1) {
+            // 等本批 reset 完成再安排下一批退出；错误重入队的 B 必须先于退出 Timer 被执行。
+            loop.queueInLoop([&loop] {
+                loop.runAfter(0.0, [&loop] { loop.quit(); });
+            });
+        }
+        if (ownerDestructions != 0) {
+            ++firesAfterDestruction;
+            loop.cancel(repeatingId);
+        }
+    });
+
+    struct Owner
+    {
+        Owner(muduo::net::EventLoop& eventLoop, muduo::net::TimerId timerId, int& destructionCount)
+            : loop(eventLoop), timer(timerId), destructions(destructionCount) {}
+        ~Owner()
+        {
+            ++destructions;
+            loop.cancel(timer);
+        }
+        muduo::net::EventLoop& loop;
+        muduo::net::TimerId timer;
+        int& destructions;
+    };
+
+    auto owner = std::make_shared<Owner>(loop, repeatingId, ownerDestructions);
+    loop.runAt(muduo::addTime(muduo::Timestamp::now(), -1.0), [owner = std::move(owner)] {
+        (void)owner;
+    });
+    loop.loop();
+
+    // 仅观察外置计数器，不解引用已销毁宿主；检测不得因固定退出窗口提前而漏过错误重入队。
+    EXPECT_EQ(1, ownerDestructions);
+    EXPECT_EQ(1, fires);
+    EXPECT_EQ(0, firesAfterDestruction);
 }
 
 } // namespace
